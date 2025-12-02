@@ -1,151 +1,268 @@
 // ==UserScript==
-// @name         SEP 自动评价
+// @name         SEP 自动评价 (教师+课程智能版)
 // @namespace    http://tampermonkey.net/
-// @version      v0.0.1
-// @description  国科大sep自动评价
-// @author       tbjuechen
+// @version      v0.0.3
+// @description  国科大SEP选课系统自动评价，智能识别课程/教师评估并填充相应内容
+// @author       tbjuechen & Gemini
 // @match        https://xkcts.ucas.ac.cn/*
 // @match        https://xkcts.ucas.ac.cn:8443/*
+// @match        https://jwxk.ucas.ac.cn/*
 // @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
 // @grant        GM_addStyle
 // ==/UserScript==
 
 (function () {
   "use strict";
+
+  // --- 核心逻辑函数 ---
+
+  /**
+   * 功能1：在列表页查找待评估的课程
+   * 适用于：https://jwxk.ucas.ac.cn/evaluate/course/* 列表页面
+   */
   function findEvaluatableCourses() {
-    // 最终存储结果的数组
     const evaluatableCourses = [];
+    const courseRows = document.querySelectorAll(".mc-body table.table tbody tr");
 
-    // 1. 精准定位到表格的所有行 (tr)
-    // 选择 class 为 'mc-body' 下的 table 的 tbody 内的所有 tr 元素
-    const courseRows = document.querySelectorAll(
-      ".mc-body table.table tbody tr"
-    );
-
-    // 2. 遍历每一行来检查
     for (const row of courseRows) {
-      // 3. 在当前行中，查找“操作区”列（即最后一个单元格）里是否包含“评估”按钮
-      // 这个按钮是一个带有 'btn' 和 'btn-primary' class 的 <a> 标签
+      // 查找包含“评估”的按钮 (通常是 btn-primary)
       const evaluateButton = row.querySelector("td:last-child a.btn-primary");
 
-      // 4. 如果找到了评估按钮，说明这一行是可评估的
       if (evaluateButton) {
-        // 5. 从当前行中提取需要的信息
-        // 使用 optional chaining (?.) 来防止因元素不存在而报错
-        // 使用 .trim() 来清除文本内容两边的空白字符
-
-        // 提取课程名称 (在第 2 个 <td> 里的 <a> 标签)
-        const courseName = row
-          .querySelector("td:nth-child(2) a")
-          ?.textContent.trim();
-
-        // 提取主讲教师 (在第 7 个 <td> 里的 <a> 标签)
-        const teacherName = row
-          .querySelector("td:nth-child(7) a")
-          ?.textContent.trim();
-
-        // 提取评估链接 (就是评估按钮的 href 属性)
+        const courseName = row.querySelector("td:nth-child(2) a")?.textContent.trim();
+        const teacherName = row.querySelector("td:nth-child(7) a")?.textContent.trim();
         const evaluateLink = evaluateButton.getAttribute("href");
 
-        // 6. 将提取到的信息作为一个对象，存入结果数组
-        if (courseName && teacherName && evaluateLink) {
-          evaluatableCourses.push({
-            courseName: courseName,
-            teacherName: teacherName,
-            evaluateLink: evaluateLink,
-          });
+        if (courseName && evaluateLink) {
+            evaluatableCourses.push({
+                courseName,
+                teacherName,
+                evaluateLink
+            });
         }
       }
     }
-
-    // 7. 返回包含所有可评估课程信息的数组
     return evaluatableCourses;
   }
 
-  // 1. 添加样式
+  /**
+   * 功能2：智能填充评估页面 (支持 教师评估 和 课程评估)
+   */
+  function autoFillSmart() {
+    let radioCount = 0;
+    let textCount = 0;
+
+    // --- 1. 客观打分题 (矩阵单选) ---
+    // 自动勾选所有 Value="5" (非常符合/非常满意)
+    const scoreRadios = document.querySelectorAll('input[type="radio"][value="5"]');
+    scoreRadios.forEach(radio => {
+        radio.click();
+        radio.checked = true;
+        radioCount++;
+    });
+
+    // --- 2. 智能主观题填充 (根据题目文字判断) ---
+    const textAreas = document.querySelectorAll('textarea');
+    textAreas.forEach(area => {
+        // 获取题目文字：HTML结构通常是 <div>题目</div> <div><textarea></div>
+        // 所以我们找 textarea 父级的上一个兄弟元素
+        const parentDiv = area.parentElement;
+        const labelDiv = parentDiv.previousElementSibling;
+        const questionText = labelDiv ? labelDiv.textContent : "";
+
+        let fillText = "";
+
+        // 策略路由：根据题目关键词决定填什么
+        if (questionText.includes("花费多少小时") || questionText.includes("每周")) {
+            fillText = "4-6小时"; // 针对课程评估Q3
+        } else if (questionText.includes("改进") || questionText.includes("意见")) {
+            fillText = "课程设置合理，老师讲解透彻，暂无改进建议。"; // 针对Q2及通用意见
+        } else if (questionText.includes("兴趣") || questionText.includes("参与之前")) {
+            fillText = "在选修之前对该领域非常感兴趣，希望建立系统的知识体系。"; // 针对课程评估Q4
+        } else if (questionText.includes("参与度") || questionText.includes("出勤")) {
+            fillText = "出勤率100%，课堂上紧跟老师思路，积极参与讨论。"; // 针对课程评估Q5
+        } else if (questionText.includes("喜欢什么") || questionText.includes("最喜欢")) {
+            fillText = "最喜欢老师的授课方式，理论联系实际，深入浅出，让我受益匪浅。"; // 针对课程评估Q1
+        } else {
+            // 默认通用好评 (用于教师评估或无法识别的题目)
+            const comments = [
+                "老师治学严谨，备课充分，对学生严格要求，我们收获很大。",
+                "教学内容丰富，重点突出，不仅传授知识，还注重培养科学思维。",
+                "老师讲课非常有激情，能够调动学生的积极性，课堂气氛活跃。"
+            ];
+            fillText = comments[Math.floor(Math.random() * comments.length)];
+        }
+
+        // 只有当没有内容或内容太短时才填充
+        if (!area.value || area.value.length < 5) {
+            area.value = fillText;
+            textCount++;
+        }
+    });
+
+    // --- 3. 杂项单选与多选 (针对课程评估底部的非打分项) ---
+    
+    // 处理漏掉的单选组 (如：教室舒适度)
+    // 逻辑：遍历所有radio name，如果该组没有选中的，就默认选第一个(通常是A.合适)
+    const allRadios = document.querySelectorAll('input[type="radio"]');
+    const radioGroups = new Set();
+    allRadios.forEach(r => radioGroups.add(r.name));
+    
+    radioGroups.forEach(name => {
+        const group = document.getElementsByName(name);
+        let hasChecked = false;
+        for (let i = 0; i < group.length; i++) {
+            if (group[i].checked) hasChecked = true;
+        }
+        if (!hasChecked && group.length > 0) {
+            group[0].click(); // 默认选A
+            group[0].checked = true;
+            radioCount++;
+        }
+    });
+
+    // 处理多选框 (如：修读原因)
+    // 逻辑：如果没有勾选，默认勾选前两个 (通常涵盖"导师要求"或"兴趣")
+    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+    checkboxes.forEach((cb, index) => {
+        if (!cb.checked) {
+             // 简单的策略：全选或者选特定的。这里为了通过校验，勾选所有看起来是积极的选项
+             // 在提供的HTML中，Item_1630是修读原因。勾选前两个一般没问题。
+             if (index < 2) { 
+                 cb.click();
+                 cb.checked = true; 
+             }
+        }
+    });
+
+    // --- 4. 聚焦验证码 ---
+    const captchaInput = document.getElementById("adminValidateCode");
+    if (captchaInput) {
+        captchaInput.focus();
+        captchaInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    return { radioCount, textCount };
+  }
+
+  // --- UI 构建部分 ---
+
   GM_addStyle(`
         #my-draggable-float-window {
             position: fixed;
-            top: 100px;
-            left: 100px;
-            width: 200px;
-            /* 调整一下高度以容纳按钮 */
-            min-height: 150px;
-            background-color: #f1f1f1;
-            border: 1px solid #d3d3d3;
-            z-index: 9999;
+            top: 150px;
+            right: 50px;
+            width: 220px;
+            min-height: 120px;
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            z-index: 99999;
             text-align: center;
-            border-radius: 5px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
         }
 
         #my-draggable-float-window-header {
-            padding: 10px;
+            padding: 12px;
             cursor: move;
-            background-color: #2196F3;
+            background-color: #007bff;
             color: white;
             font-weight: bold;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
+            font-size: 14px;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            user-select: none;
         }
 
         #my-draggable-float-window-content {
-            padding: 10px;
-            cursor: default;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            align-items: center;
         }
 
-        /* (可选) 为按钮添加一点样式 */
-        #my-action-button {
-            padding: 8px 12px;
-            background-color: #4CAF50; /* 绿色 */
+        .sep-btn {
+            padding: 8px 16px;
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            margin-top: 10px;
+            font-size: 13px;
+            transition: background-color 0.2s;
+            width: 100%;
         }
 
-        #my-action-button:hover {
-            background-color: #45a049;
+        #btn-find-courses {
+            background-color: #17a2b8;
+        }
+        #btn-find-courses:hover { background-color: #138496; }
+
+        #btn-auto-fill {
+            background-color: #28a745;
+        }
+        #btn-auto-fill:hover { background-color: #218838; }
+
+        .sep-status-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
         }
     `);
 
-  // 2. 创建 HTML 元素
   let floatWindow = document.createElement("div");
   floatWindow.id = "my-draggable-float-window";
 
-  // 2.1 创建头部 (用于拖动)
   let header = document.createElement("div");
   header.id = "my-draggable-float-window-header";
-  header.textContent = "SEP 自动评价系统";
+  header.textContent = "SEP 评教助手 (智能版)";
   floatWindow.appendChild(header);
 
-  // 2.2 创建内容区域
   let content = document.createElement("div");
   content.id = "my-draggable-float-window-content";
-  // content.innerHTML = '这是一个悬浮窗。'; // 初始文本
   floatWindow.appendChild(content);
 
-  // ----------------------------------------------------
-  // 2.3 【新增】创建按钮并添加到内容区域
-  // ----------------------------------------------------
-  let myButton = document.createElement("button");
-  myButton.id = "my-action-button"; // 给按钮一个 ID，方便用 CSS 选择
-  myButton.textContent = "查找待评价老师"; // 按钮上显示的文字
+  // --- 根据页面类型渲染按钮 ---
+  const currentUrl = window.location.href;
+  const statusText = document.createElement("div");
+  statusText.className = "sep-status-text";
 
-  // (关键) 将按钮添加到 "content" div 中
-  content.appendChild(myButton);
+  // 判断是否为评估页面 (包含 evaluateTeacher 或 evaluateCourse)
+  const isEvalPage = currentUrl.includes("evaluateTeacher") || currentUrl.includes("evaluateCourse") || document.querySelector("#regfrm");
 
-  // (可选) 为按钮添加点击事件
-  myButton.addEventListener("click", function () {
-    console.log(findEvaluatableCourses());
-  });
-  // ----------------------------------------------------
+  if (isEvalPage) {
+      let fillBtn = document.createElement("button");
+      fillBtn.id = "btn-auto-fill";
+      fillBtn.className = "sep-btn";
+      fillBtn.textContent = "一键全选好评 + 填充";
+      fillBtn.onclick = function() {
+          const res = autoFillSmart();
+          statusText.textContent = `已自动处理 ${res.radioCount} 个选项，填写 ${res.textCount} 个问答。请手动输入验证码。`;
+          statusText.style.color = "green";
+      };
+      content.appendChild(fillBtn);
+  } else {
+      let findBtn = document.createElement("button");
+      findBtn.id = "btn-find-courses";
+      findBtn.className = "sep-btn";
+      findBtn.textContent = "查找待评价课程";
+      findBtn.onclick = function() {
+          const list = findEvaluatableCourses();
+          if (list.length > 0) {
+              console.log(list);
+              statusText.textContent = `发现 ${list.length} 门待评课程 (详情见F12控制台)`;
+          } else {
+              statusText.textContent = "当前页面未发现待评课程按钮";
+          }
+      };
+      content.appendChild(findBtn);
+  }
 
-  // 3. 将窗口添加到页面
+  content.appendChild(statusText);
   document.body.appendChild(floatWindow);
 
-  // 4. 实现拖动逻辑 (与之前相同)
+  // --- 拖拽逻辑 ---
   let isDragging = false;
   let offsetX = 0;
   let offsetY = 0;
@@ -161,22 +278,16 @@
     if (!isDragging) return;
     let newX = e.clientX - offsetX;
     let newY = e.clientY - offsetY;
-
-    // 边界检查
-    newX = Math.max(
-      0,
-      Math.min(newX, window.innerWidth - floatWindow.offsetWidth)
-    );
-    newY = Math.max(
-      0,
-      Math.min(newY, window.innerHeight - floatWindow.offsetHeight)
-    );
-
+    const maxX = window.innerWidth - floatWindow.offsetWidth;
+    const maxY = window.innerHeight - floatWindow.offsetHeight;
+    newX = Math.max(0, Math.min(newX, maxX));
+    newY = Math.max(0, Math.min(newY, maxY));
     floatWindow.style.left = newX + "px";
     floatWindow.style.top = newY + "px";
   });
 
-  document.addEventListener("mouseup", function (e) {
+  document.addEventListener("mouseup", function () {
     isDragging = false;
   });
+
 })();
